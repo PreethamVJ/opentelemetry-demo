@@ -11,6 +11,12 @@ def healthy(name: str = "cart") -> dict:
     return {name: {"requests": 100.0, "errors": 0.0, "p95_ms": 20.0, "baseline_p95_ms": 18.0}}
 
 
+def test_nan_quantiles_are_dropped(monkeypatch):
+    rows = [{"metric": {"service_name": "a"}, "value": [0, "NaN"]}, {"metric": {"service_name": "b"}, "value": [0, "12"]}]
+    monkeypatch.setattr(poller, "prom_query", lambda expr: rows)
+    assert poller._by_service("x") == {"b": 12.0}
+
+
 def test_incident_fixture_matches_contract():
     Incident.model_validate(json.loads(FIXTURE.read_text()))
 
@@ -26,11 +32,20 @@ def test_error_rate_breach_needs_enough_requests():
     assert poller.find_breaches(quiet, {}, set()) == []
 
 
+def test_steady_error_rate_is_not_an_incident():
+    steady = {"frontend-proxy": {"requests": 100.0, "errors": 6.0, "baseline_error_rate": 0.055, "p95_ms": 50.0, "baseline_p95_ms": 50.0}}
+    jump = {"frontend-proxy": {"requests": 100.0, "errors": 30.0, "baseline_error_rate": 0.055, "p95_ms": 50.0, "baseline_p95_ms": 50.0}}
+    assert poller.find_breaches(steady, {}, set()) == []
+    assert poller.find_breaches(jump, {}, set())[0]["kind"] == "error_rate"
+
+
 def test_latency_breach_compares_with_baseline():
     slow = {"ad": {"requests": 100.0, "errors": 0.0, "p95_ms": 2500.0, "baseline_p95_ms": 50.0}}
     always_slow = {"ad": {"requests": 100.0, "errors": 0.0, "p95_ms": 1200.0, "baseline_p95_ms": 1100.0}}
     assert poller.find_breaches(slow, {}, set())[0]["kind"] == "latency"
     assert poller.find_breaches(always_slow, {}, set()) == []
+    no_history = {"ad": {"requests": 100.0, "errors": 0.0, "p95_ms": 9000.0, "baseline_p95_ms": 0.0}}
+    assert poller.find_breaches(no_history, {}, set()) == []
 
 
 def test_stopped_container_is_flagged_only_after_it_was_seen_running():

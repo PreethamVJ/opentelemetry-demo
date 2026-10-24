@@ -15,6 +15,7 @@ from oncall.guard import is_banned_service
 
 SERVER_KINDS = 'span_kind=~"SPAN_KIND_SERVER|SPAN_KIND_CONSUMER"'
 ERROR_RATE = 0.05
+ERROR_RATIO = 2.0
 P95_MS = 1000.0
 P95_RATIO = 3.0
 MIN_REQUESTS = 20
@@ -23,7 +24,8 @@ BAD_STATES = {"exited", "dead", "restarting", "paused"}
 
 
 def _by_service(expr: str) -> dict[str, float]:
-    return {r["metric"]["service_name"]: float(r["value"][1]) for r in prom_query(expr)}
+    values = {r["metric"]["service_name"]: float(r["value"][1]) for r in prom_query(expr)}
+    return {name: value for name, value in values.items() if value == value}
 
 
 def sample_metrics(window: int = WINDOW_MINUTES) -> dict[str, dict[str, float]]:
@@ -35,10 +37,13 @@ def sample_metrics(window: int = WINDOW_MINUTES) -> dict[str, dict[str, float]]:
     requests = _by_service(f"sum by (service_name)(increase({calls}[{window}m]))")
     errors = _by_service(f"sum by (service_name)(increase({failed}[{window}m]))")
     latency, baseline = _by_service(p95), _by_service(base)
+    prev_requests = _by_service(f"sum by (service_name)(increase({calls}[10m] offset {window}m))")
+    prev_errors = _by_service(f"sum by (service_name)(increase({failed}[10m] offset {window}m))")
     return {
         name: {
             "requests": requests[name],
             "errors": errors.get(name, 0.0),
+            "baseline_error_rate": prev_errors.get(name, 0.0) / prev_requests[name] if prev_requests.get(name, 0.0) >= MIN_REQUESTS else 0.0,
             "p95_ms": latency.get(name, 0.0),
             "baseline_p95_ms": baseline.get(name, 0.0),
         }
@@ -62,9 +67,9 @@ def find_breaches(metrics: dict[str, dict[str, float]], containers: dict[str, st
         if is_banned_service(name) or m["requests"] < MIN_REQUESTS:
             continue
         rate = m["errors"] / m["requests"]
-        if rate >= ERROR_RATE:
+        if rate >= ERROR_RATE and rate >= ERROR_RATIO * m.get("baseline_error_rate", 0.0):
             breaches.append({"kind": "error_rate", "service": name, "value": round(rate, 3), "threshold": ERROR_RATE})
-        slow = m["p95_ms"] >= P95_MS and (m["baseline_p95_ms"] <= 0 or m["p95_ms"] >= P95_RATIO * m["baseline_p95_ms"])
+        slow = m["p95_ms"] >= P95_MS and m["baseline_p95_ms"] > 0 and m["p95_ms"] >= P95_RATIO * m["baseline_p95_ms"]
         if slow:
             breaches.append({"kind": "latency", "service": name, "value": round(m["p95_ms"]), "threshold": P95_MS})
     for name, state in containers.items():
