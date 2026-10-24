@@ -12,6 +12,7 @@ services:
       PROM_URL: http://prometheus:9090
       OPENSEARCH_URL: http://opensearch:9200
       ONCALL_MODE: docker
+      ONCALL_DETECT: ${ONCALL_DETECT:-1}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}

@@ -1,0 +1,7 @@
+{
+  "id": "INC-FIX-PAYMENT-001",
+  "symptom": "checkout error rate 62% (threshold 5%)",
+  "started_at": "2026-01-01T10:00:00+00:00",
+  "window": "2m",
+  "source": "poller"
+}

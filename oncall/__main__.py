@@ -64,8 +64,19 @@ def summarise(llm: str = typer.Option("real", "--llm", help="real or fake")) -> 
 
 
 @app.command()
-def detect() -> None:
-    typer.echo("Detector is not available yet; no investigation started.")
+def detect(
+    once: bool = typer.Option(False, "--once", help="poll a single time and print any incident"),
+    interval: float = typer.Option(15.0, "--interval", help="seconds between polls"),
+) -> None:
+    from oncall.detect.poller import Detector
+
+    detector = Detector(interval=interval, confirm=1 if once else 2)
+    if once:
+        incident = detector.poll_once()
+        typer.echo(incident.model_dump_json(indent=2) if incident else "no breach")
+        return
+    typer.echo(f"watching every {interval}s (Ctrl+C to stop)")
+    detector.run()
 
 
 @app.command()
