@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from oncall.clients.backends import docker, prom_query
+from oncall.clients.backends import docker_containers, prom_query
 from oncall.config import settings
 from oncall.contracts import Incident
 from oncall.guard import is_banned_service
@@ -52,13 +51,7 @@ def sample_metrics(window: int = WINDOW_MINUTES) -> dict[str, dict[str, float]]:
 
 
 def sample_containers() -> dict[str, str]:
-    out = docker("ps", "-a", "--format", "{{.Names}}\t{{.State}}")
-    states = {}
-    for line in out.splitlines():
-        name, _, state = line.partition("\t")
-        if name:
-            states[name] = state.strip().lower()
-    return states
+    return {attrs["Name"].lstrip("/"): str(attrs["State"]["Status"]).lower() for attrs in docker_containers()}
 
 
 def find_breaches(metrics: dict[str, dict[str, float]], containers: dict[str, str], seen_running: set[str]) -> list[dict[str, Any]]:
@@ -127,26 +120,30 @@ def investigate_incident(incident: Incident) -> None:
 
 class Detector:
     def __init__(self, on_incident: Callable[[Incident], None] = investigate_incident, interval: float = 15.0,
-                 confirm: int = 2, cooldown: float = 600.0, runs_dir: str | None = None) -> None:
+                 confirm: int = 2, clear_after: int = 8, runs_dir: str | None = None) -> None:
         self.on_incident = on_incident
         self.interval = interval
         self.confirm = confirm
-        self.cooldown = cooldown
+        self.clear_after = clear_after
         self.runs_dir = runs_dir or settings.RUNS_DIR
         self.seen_running: set[str] = set()
+        self.reported: set[tuple[str, str]] = set()
         self.streak = 0
-        self.quiet_until = 0.0
+        self.quiet_polls = 0
         self.stop = threading.Event()
 
-    def poll_once(self, now: float | None = None) -> Incident | None:
-        now = time.monotonic() if now is None else now
+    def poll_once(self) -> Incident | None:
         breaches = find_breaches(sample_metrics(), sample_containers(), self.seen_running)
-        self.streak = self.streak + 1 if breaches else 0
-        if self.streak < self.confirm or now < self.quiet_until:
+        self.quiet_polls = 0 if breaches else self.quiet_polls + 1
+        if self.quiet_polls >= self.clear_after:
+            self.reported.clear()
+        fresh = [b for b in breaches if (b["kind"], b["service"]) not in self.reported]
+        self.streak = self.streak + 1 if fresh else 0
+        if self.streak < self.confirm:
             return None
-        incident = make_incident(breaches)
-        save_incident(incident, breaches, self.runs_dir)
-        self.quiet_until = now + self.cooldown
+        incident = make_incident(fresh)
+        save_incident(incident, fresh, self.runs_dir)
+        self.reported.update((b["kind"], b["service"]) for b in fresh)
         self.streak = 0
         self.on_incident(incident)
         return incident

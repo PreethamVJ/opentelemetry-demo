@@ -11,6 +11,12 @@ def healthy(name: str = "cart") -> dict:
     return {name: {"requests": 100.0, "errors": 0.0, "p95_ms": 20.0, "baseline_p95_ms": 18.0}}
 
 
+def test_container_states_come_from_the_docker_sdk(monkeypatch):
+    attrs = [{"Name": "/shipping", "State": {"Status": "exited"}}, {"Name": "/cart", "State": {"Status": "running"}}]
+    monkeypatch.setattr(poller, "docker_containers", lambda: attrs)
+    assert poller.sample_containers() == {"shipping": "exited", "cart": "running"}
+
+
 def test_nan_quantiles_are_dropped(monkeypatch):
     rows = [{"metric": {"service_name": "a"}, "value": [0, "NaN"]}, {"metric": {"service_name": "b"}, "value": [0, "12"]}]
     monkeypatch.setattr(poller, "prom_query", lambda expr: rows)
@@ -56,16 +62,30 @@ def test_stopped_container_is_flagged_only_after_it_was_seen_running():
     assert poller.find_breaches({}, {"never-started": "exited"}, set()) == []
 
 
-def test_detector_opens_one_incident_after_confirmation(tmp_path, monkeypatch):
+def test_detector_opens_one_incident_per_new_breach(tmp_path, monkeypatch):
     bad = {"checkout": {"requests": 100.0, "errors": 40.0, "p95_ms": 50.0, "baseline_p95_ms": 50.0}}
-    monkeypatch.setattr(poller, "sample_metrics", lambda: bad)
-    monkeypatch.setattr(poller, "sample_containers", lambda: {})
+    state = {"metrics": bad, "containers": {}}
+    monkeypatch.setattr(poller, "sample_metrics", lambda: state["metrics"])
+    monkeypatch.setattr(poller, "sample_containers", lambda: state["containers"])
     opened = []
-    detector = poller.Detector(on_incident=opened.append, confirm=2, cooldown=600, runs_dir=str(tmp_path))
-    assert detector.poll_once(now=0) is None
-    incident = detector.poll_once(now=15)
+    detector = poller.Detector(on_incident=opened.append, confirm=2, clear_after=3, runs_dir=str(tmp_path))
+    assert detector.poll_once() is None
+    incident = detector.poll_once()
     assert incident is not None and incident.source == "poller" and "checkout" in incident.symptom
-    assert detector.poll_once(now=30) is None
-    assert detector.poll_once(now=45) is None
-    assert len(opened) == 1
     assert (tmp_path / "incidents" / f"{incident.id}.json").exists()
+    assert detector.poll_once() is None and detector.poll_once() is None
+    assert len(opened) == 1
+
+    detector.seen_running.add("shipping")
+    state["containers"] = {"shipping": "exited"}
+    assert detector.poll_once() is None
+    second = detector.poll_once()
+    assert second is not None and "shipping" in second.symptom and "checkout" not in second.symptom
+    assert len(opened) == 2
+
+    state["metrics"], state["containers"] = {}, {}
+    for _ in range(3):
+        detector.poll_once()
+    state["metrics"] = bad
+    detector.poll_once()
+    assert detector.poll_once() is not None and len(opened) == 3
