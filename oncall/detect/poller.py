@@ -104,18 +104,18 @@ def save_incident(incident: Incident, breaches: list[dict[str, Any]], runs_dir: 
 
 
 def investigate_incident(incident: Incident) -> None:
+    from oncall.agent.pipeline import log_event, prepare
     from oncall.agent.run import investigate, new_run_id
     from oncall.events import EventLog
     from oncall.ledger import EvidenceLedger
     from oncall.llm import LLMClient
-    from oncall.schema import to_submission
 
+    log_event(incident.id, f"incident opened by the poller: {incident.symptom}")
     events = EventLog(new_run_id(), settings.RUNS_DIR)
     events.emit("alert", incident.model_dump())
-    diagnosis, _ = investigate(incident.symptom, LLMClient(), EvidenceLedger(), events)
-    diagnosis.incident_id = incident.id
-    path = Path(settings.RUNS_DIR) / "incidents" / f"{incident.id}.diagnosis.json"
-    path.write_text(json.dumps(to_submission(diagnosis), indent=2), encoding="utf-8")
+    ledger = EvidenceLedger()
+    diagnosis, _ = investigate(incident.symptom, LLMClient(), ledger, events)
+    prepare(incident, diagnosis, ledger)
 
 
 class Detector:

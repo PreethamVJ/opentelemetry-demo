@@ -80,6 +80,24 @@ def detect(
 
 
 @app.command()
+def approve(
+    incident_id: str = typer.Argument(..., help="e.g. INC-20261024-071153-a591"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="ask the Action API to check the action without changing anything"),
+) -> None:
+    from oncall.agent import pipeline
+
+    shown = pipeline.view(incident_id)
+    if not shown or not shown["plan"]:
+        typer.echo("no plan for that incident yet")
+        raise typer.Exit(1)
+    plan = shown["plan"]
+    typer.echo(f"{plan['action']} on {plan['target']} {plan['params']}\nreason: {plan['reason']}\nevidence: {', '.join(plan['evidence_ids'])}")
+    answer = typer.prompt("Type 'yes' to run this, anything else rejects it", default="no")
+    result = pipeline.decide(incident_id, answer.strip().lower() == "yes", "operator", dry_run)
+    typer.echo(result.detail)
+
+
+@app.command()
 def serve() -> None:
     try:
         import uvicorn

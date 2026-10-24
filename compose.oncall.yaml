@@ -13,6 +13,7 @@ services:
       OPENSEARCH_URL: http://opensearch:9200
       ONCALL_MODE: docker
       ONCALL_DETECT: ${ONCALL_DETECT:-1}
+      ACTION_API_URL: ${ACTION_API_URL:-http://host.docker.internal:8098}
     volumes:
       - ./oncall:/app/oncall
       - ./oncall/runs:/app/runs

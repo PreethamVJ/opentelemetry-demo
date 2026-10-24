@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI On-Call Engineer</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#14181f;--mute:#5d6675;--line:#dfe3ea;--accent:#2563eb;--ok:#15803d;--warn:#b45309;--bad:#b91c1c}
+@media (prefers-color-scheme:dark){:root{--bg:#0e1116;--card:#171b22;--ink:#e8ebf0;--mute:#97a0ad;--line:#2a313b;--accent:#6ea0ff;--ok:#4ade80;--warn:#fbbf24;--bad:#f87171}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
+header{padding:12px 16px;border-bottom:1px solid var(--line);background:var(--card);display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center}
+header h1{font-size:16px;margin:0 8px 0 0}
+header a{color:var(--accent);text-decoration:none;padding:2px 8px;border:1px solid var(--line);border-radius:999px;font-size:13px}
+header a:hover{border-color:var(--accent)}
+.spacer{flex:1}
+main{display:grid;grid-template-columns:300px 1fr;gap:16px;padding:16px;max-width:1300px;margin:0 auto}
+@media (max-width:800px){main{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:12px}
+.item{padding:10px;border:1px solid var(--line);border-radius:8px;margin-bottom:8px;cursor:pointer;background:var(--card)}
+.item.sel{border-color:var(--accent)}
+.item small{color:var(--mute);display:block}
+.pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;border:1px solid currentColor}
+.awaiting_approval,.needs_human{color:var(--warn)}.resolved{color:var(--ok)}.failed,.rejected{color:var(--bad)}.investigating,.escalated{color:var(--mute)}
+h2{font-size:14px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute)}
+.bar{height:8px;border-radius:4px;background:var(--line);overflow:hidden;margin:4px 0 8px}
+.bar>div{height:100%;background:var(--accent)}
+.chip{display:inline-block;margin:2px 4px 2px 0;padding:1px 8px;border-radius:6px;background:var(--bg);border:1px solid var(--line);font-family:ui-monospace,monospace;font-size:12px}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+button{font:inherit;padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+button.danger{color:var(--bad)}
+button:disabled{opacity:.5;cursor:wait}
+pre{white-space:pre-wrap;margin:0;font:12px/1.5 ui-monospace,monospace}
+.tabs button{border-radius:8px 8px 0 0}.tabs button.on{border-color:var(--accent);color:var(--accent)}
+.kill{color:var(--bad);font-weight:600}
+.muted{color:var(--mute)}
+</style>
+</head>
+<body>
+<header>
+  <h1>AI On-Call Engineer</h1>
+  <span id="links"></span>
+  <span class="spacer"></span>
+  <span id="kill"></span>
+  <button id="killbtn" title="Block every action until switched off"></button>
+</header>
+<main>
+  <section>
+    <h2>Incidents</h2>
+    <div id="list"><p class="muted">Waiting for the detector…</p></div>
+  </section>
+  <section>
+    <div class="tabs"><button id="t-inc" class="on">Incident</button> <button id="t-graph">LangGraph</button></div>
+    <div id="detail"></div>
+    <div id="graph" hidden class="card"><pre id="mermaid" class="mermaid"></pre><p class="muted">The agent's investigation graph: overview, reason, act (loop), finalize.</p></div>
+  </section>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let selected = null, killOn = false, busy = false, graphLoaded = false;
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const label = s => ({awaiting_approval:'awaiting your approval',needs_human:'needs a human'}[s] || s);
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+}
+
+async function loadLinks() {
+  const links = await api('/api/links');
+  $('links').innerHTML = links.map(l => `<a href="${esc(l.url)}" target="_blank" rel="noopener" title="${esc(l.note)}">${esc(l.name)}</a>`).join(' ');
+}
+
+async function refresh() {
+  if (busy) return;
+  const data = await api('/api/incidents');
+  killOn = data[0].kill_switch;
+  $('kill').innerHTML = killOn ? '<span class="kill">KILL SWITCH ON: no action will run</span>' : '';
+  $('killbtn').textContent = killOn ? 'Turn kill switch off' : 'Kill switch';
+  const items = data.slice(1);
+  if (!selected && items.length) selected = items[0].incident.id;
+  $('list').innerHTML = items.length ? items.map(v => `
+    <div class="item ${v.incident.id === selected ? 'sel' : ''}" data-id="${esc(v.incident.id)}">
+      <span class="pill ${v.status}">${label(v.status)}</span>
+      <div>${esc(v.incident.symptom)}</div>
+      <small>${esc(v.incident.id)}</small>
+    </div>`).join('') : '<p class="muted">No incidents. The detector watches the shop and opens one by itself.</p>';
+  document.querySelectorAll('.item').forEach(el => el.onclick = () => { selected = el.dataset.id; refresh(); });
+  render(items.find(v => v.incident.id === selected));
+}
+
+function render(v) {
+  if (!v) { $('detail').innerHTML = ''; return; }
+  const d = v.diagnosis, p = v.plan, r = v.result;
+  const cited = new Set(d?.evidence_ids || []);
+  let html = `<div class="card"><h2>Incident</h2><b>${esc(v.incident.symptom)}</b><br>
+    <span class="muted">${esc(v.incident.id)} · started ${esc(v.incident.started_at)} · source ${esc(v.incident.source)}</span></div>`;
+  if (!d) html += '<div class="card"><h2>Diagnosis</h2><span class="muted">The agent is investigating…</span></div>';
+  else html += `<div class="card"><h2>Diagnosis</h2>
+    <b>${esc(d.component)}</b> <span class="muted">(${esc(d.fault_class)})</span> ${d.escalate ? '<span class="pill needs_human">escalate</span>' : ''}
+    <div class="bar"><div style="width:${Math.round(d.confidence * 100)}%"></div></div>
+    <div class="muted">Confidence ${Math.round(d.confidence * 100)}%</div>
+    <p>${esc(d.cause)}</p>
+    <div>${(d.evidence_ids || []).map(i => `<span class="chip">${esc(i)}</span>`).join('') || '<span class="muted">no evidence cited</span>'}</div></div>`;
+  const ev = (v.evidence || []).filter(e => cited.has(e.id));
+  if (ev.length) html += `<div class="card"><h2>Evidence</h2>${ev.map(e => `<div><span class="chip">${esc(e.id)}</span> <span class="muted">${esc(e.signal)} · ${esc(e.tool)}</span><br>${esc(e.summary)}</div>`).join('<hr style="border:0;border-top:1px solid var(--line)">')}</div>`;
+  if (p) {
+    const open = !r;
+    html += `<div class="card"><h2>Plan card</h2>
+      <div><b>${esc(p.action)}</b> on <b>${esc(p.target)}</b> <span class="muted">${esc(JSON.stringify(p.params || {}))}</span></div>
+      <p>${esc(p.reason)}</p>
+      ${open ? `<div class="row">
+        ${p.action === 'ESCALATE_TO_HUMAN'
+          ? '<button class="primary" data-a="yes">Acknowledge escalation</button>'
+          : '<button class="primary" data-a="yes">Yes, run it</button><button data-a="dry">Dry run</button>'}
+        <button class="danger" data-a="no">No</button></div>` : ''}
+      ${r ? `<p><span class="pill ${v.status}">${label(v.status)}</span> ${esc(r.detail)}</p>` : ''}</div>`;
+  }
+  if (v.timeline.length) html += `<div class="card"><h2>Timeline</h2>${v.timeline.map(e => `<div><span class="muted">${esc(e.ts.slice(11, 19))}</span> ${esc(e.event)}</div>`).join('')}</div>`;
+  if (v.report) html += `<div class="card"><h2>Report</h2><pre>${esc(v.report)}</pre></div>`;
+  $('detail').innerHTML = html;
+  document.querySelectorAll('[data-a]').forEach(b => b.onclick = () => decide(v.incident.id, b.dataset.a, b));
+}
+
+async function decide(id, a, btn) {
+  busy = true;
+  document.querySelectorAll('[data-a]').forEach(b => b.disabled = true);
+  btn.textContent = 'Working… (checking recovery can take a minute)';
+  try {
+    await api(`/api/incidents/${encodeURIComponent(id)}/decision`, {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({approve: a !== 'no', dry_run: a === 'dry', approver: 'operator'})});
+  } catch (e) { alert(e.message); }
+  busy = false;
+  refresh();
+}
+
+$('killbtn').onclick = async () => { await api('/api/kill-switch/' + (killOn ? 'off' : 'on'), {method: 'POST'}); refresh(); };
+$('t-inc').onclick = () => { $('detail').hidden = false; $('graph').hidden = true; $('t-inc').className = 'on'; $('t-graph').className = ''; };
+$('t-graph').onclick = async () => {
+  $('detail').hidden = true; $('graph').hidden = false; $('t-inc').className = ''; $('t-graph').className = 'on';
+  if (graphLoaded) return;
+  const g = await api('/api/graph');
+  $('mermaid').textContent = g.mermaid;
+  try { mermaid.initialize({startOnLoad: false}); await mermaid.run({nodes: [$('mermaid')]}); graphLoaded = true; } catch (e) {}
+};
+
+loadLinks(); refresh(); setInterval(() => refresh().catch(() => {}), 3000);
+</script>
+</body>
+</html>
